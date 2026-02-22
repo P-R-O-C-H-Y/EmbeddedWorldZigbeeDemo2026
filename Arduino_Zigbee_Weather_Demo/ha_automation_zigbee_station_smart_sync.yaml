@@ -1,0 +1,60 @@
+alias: "Zigbee Weather Station: Ultra-Optimized Sync"
+description: >-
+  Sends current data (every 5m) and forecast (every 1h) using packed 32-bit
+  integers
+triggers:
+  - entity_id: sensor.espressif_zigbeeweatherstationdemo_temperature
+    trigger: state
+actions:
+  - action: rest_command.fetch_openmeteo_forecast
+    response_variable: raw_weather
+  - if:
+      - condition: template
+        value_template: "{{ raw_weather['status'] == 200 }}"
+    then:
+      - variables:
+          curr: "{{ raw_weather['content']['current'] }}"
+          daily: "{{ raw_weather['content']['daily'] }}"
+          needs_forecast: >
+            {{ (as_timestamp(now()) -
+            as_timestamp(states('input_datetime.last_weather_forecast_sync') |
+            default(0))) > 3300 }}
+      - action: zha.set_zigbee_cluster_attribute
+        data:
+          ieee: D0:CF:13:FE:FF:E1:9B:4C
+          endpoint_id: 2
+          cluster_id: 13
+          attribute: 85
+          value: >
+            {% set c_code = curr.weather_code | int %} 
+            {% set c_hum = curr.relative_humidity_2m | int %} 
+            {% set c_temp = (curr.temperature_2m | int) + 50 %} 
+            {# Packing: Temp<<14 | Hum<<7 | Code #} {{ (c_temp * 16384) + (c_hum * 128) + c_code }}
+      - if:
+          - condition: template
+            value_template: "{{ needs_forecast }}"
+        then:
+          - repeat:
+              count: 3
+              sequence:
+                - action: zha.set_zigbee_cluster_attribute
+                  data:
+                    ieee: D0:CF:13:FE:FF:E1:9B:4C
+                    endpoint_id: "{{ 3 + repeat.index - 1 }}"
+                    cluster_id: 13
+                    attribute: 85
+                    value: >
+                      {% set i = repeat.index - 1 %} 
+                      {% set date_str = daily.time[i] %} 
+                      {% set day = date_str.split('-')[2] | int %} 
+                      {% set month = date_str.split('-')[1] | int %} 
+                      {% set code = daily.weather_code[i] | int %} 
+                      {% set t_min = (daily.temperature_2m_min[i] | int) + 50 %} 
+                      {% set t_max = (daily.temperature_2m_max[i] | int) + 50 %} 
+                      {# Packing: Month<<26 | Day<<21 | Max<<14 | Min<<7 | Code #} 
+                      {{ (month * 67108864) + (day * 2097152) + (t_max * 16384) + (t_min * 128) + code }}
+          - action: input_datetime.set_datetime
+            target:
+              entity_id: input_datetime.last_weather_forecast_sync
+            data:
+              timestamp: "{{ as_timestamp(now()) }}"
