@@ -28,7 +28,9 @@
 #define I2C_SDA_PIN 2
 
 #define WAIT_FOR_HA_MS 3000u    /* Wait for HA to send OUT/forecast after report (~1.5s typical, 3s buffer) */
+#define ZIGBEE_FIRST_FORM_DELAY_MS 5000u  /* Extra delay after first Zigbee join for proper config */
 #define SLEEP_SECONDS 300u      /* 5 min deep sleep between updates */
+#define ZIGBEE_CONNECT_TIMEOUT_MS 10000u  /* If Zigbee fails to connect within 10s, continue without it */
 
 /* Sentinel values: HA did not send data; UI shows "---" for these. */
 #define OUT_TEMP_NO_DATA  999.0f   /* format shows --- when |temp| > 99.9 */
@@ -42,9 +44,10 @@
 // Zigbee settings
 #define ZIGBEE_IN_ENDPOINT 1 //temp, humidity, battery
 #define ZIGBEE_OUT_ENDPOINT 2 // Analog (out temp, hum and weather code)
-#define ZIGBEE_FORECAST1_ENDPOINT 3 // Analog (day 1 temp min, max, weather code and date)
-#define ZIGBEE_FORECAST2_ENDPOINT 4 // Analog (day 2 temp min, max, weather code and date)
-#define ZIGBEE_FORECAST3_ENDPOINT 5 // Analog (day 3 temp min, max, weather code and date)
+#define ZIGBEE_FORECAST1_ENDPOINT 3   // Analog (day 1 wmo, tmin, tmax - fits in float)
+#define ZIGBEE_FORECAST2_ENDPOINT 4   // Analog (day 2 wmo, tmin, tmax)
+#define ZIGBEE_FORECAST3_ENDPOINT 5   // Analog (day 3 wmo, tmin, tmax)
+#define ZIGBEE_FORECAST_DATES_ENDPOINT 6  // Analog (FC1/2/3 dates: idx|(date<<2), sent 3x)
 
 // Preferences settings
 #define PREFS_NS "weather"
@@ -71,6 +74,7 @@ static ZigbeeAnalog zbTempOut = ZigbeeAnalog(ZIGBEE_OUT_ENDPOINT);
 static ZigbeeAnalog zbForecast1 = ZigbeeAnalog(ZIGBEE_FORECAST1_ENDPOINT);
 static ZigbeeAnalog zbForecast2 = ZigbeeAnalog(ZIGBEE_FORECAST2_ENDPOINT);
 static ZigbeeAnalog zbForecast3 = ZigbeeAnalog(ZIGBEE_FORECAST3_ENDPOINT);
+static ZigbeeAnalog zbForecastDates = ZigbeeAnalog(ZIGBEE_FORECAST_DATES_ENDPOINT);
 
 static Preferences prefs;
 
@@ -110,14 +114,29 @@ static void prefs_save_out(void) {
   prefs.end();
 }
 
+static bool prefs_get_zigbee_formed(void) {
+  if (!prefs.begin(PREFS_NS, true)) return true;  /* assume formed if can't read */
+  bool v = prefs.getBool("zb_formed", false);
+  prefs.end();
+  return v;
+}
+
+static void prefs_set_zigbee_formed(void) {
+  if (!prefs.begin(PREFS_NS, false)) return;
+  prefs.putBool("zb_formed", true);
+  prefs.end();
+}
+
 static void prefs_save_forecast(int idx, int month, int day) {
   if (idx < 0 || idx >= 3) return;
   if (!prefs.begin(PREFS_NS, false)) return;
   char key[8];
-  snprintf(key, sizeof(key), "fc%d_m", idx);
-  prefs.putInt(key, month);
-  snprintf(key, sizeof(key), "fc%d_d", idx);
-  prefs.putInt(key, day);
+  if (month > 0 && day > 0) {
+    snprintf(key, sizeof(key), "fc%d_m", idx);
+    prefs.putInt(key, month);
+    snprintf(key, sizeof(key), "fc%d_d", idx);
+    prefs.putInt(key, day);
+  }
   snprintf(key, sizeof(key), "fc%d_wmo", idx);
   prefs.putInt(key, current_forecast[idx].wmo_code);
   snprintf(key, sizeof(key), "fc%d_tmin", idx);
@@ -127,20 +146,27 @@ static void prefs_save_forecast(int idx, int month, int day) {
   prefs.end();
 }
 
-/* HA packing: (temp+50)*16384 + hum*128 + code = Temp<<14 | Hum<<7 | Code */
+/* HA packing: (temp*10+500)<<14 | Hum<<7 | Code. Temp -50.0..+50.0°C, 1 decimal. */
 static void decode_current_packed(uint32_t packed, float *out_temp_c, float *out_hum, int *out_wmo) {
   if (out_wmo) *out_wmo = (int)(packed & 0x7Fu);
   if (out_hum) *out_hum = (float)((packed >> 7u) & 0x7Fu);
-  if (out_temp_c) *out_temp_c = (float)(((packed >> 14u) & 0xFFu) - 50);
+  if (out_temp_c) *out_temp_c = (float)(((int)((packed >> 14u) & 0x3FFu) - 500) / 10.0f);
 }
 
-/* HA packing: Month<<26 | Day<<21 | Tmax+50<<14 | Tmin+50<<7 | Code (same layout) */
-static void decode_forecast_packed(uint32_t packed, int *month, int *day, int *wmo, int *tmin_c, int *tmax_c) {
-  if (month) *month = (int)((packed >> 26u) & 0x0Fu);
-  if (day) *day = (int)((packed >> 21u) & 0x1Fu);
+/* FC packing (fits in float): WMO | (Tmin+35)<<7 | (Tmax+35)<<14. Temps -35..50 C. */
+static void decode_forecast_packed(uint32_t packed, int *wmo, int *tmin_c, int *tmax_c) {
   if (wmo) *wmo = (int)(packed & 0x7Fu);
-  if (tmin_c) *tmin_c = (int)((packed >> 7u) & 0x7Fu) - 50;
-  if (tmax_c) *tmax_c = (int)((packed >> 14u) & 0x7Fu) - 50;
+  if (tmin_c) *tmin_c = (int)((packed >> 7u) & 0x7Fu) - 35;
+  if (tmax_c) *tmax_c = (int)((packed >> 14u) & 0x7Fu) - 35;
+}
+
+/* FC dates packing: idx | (date<<2), date=(month-1)*31+(day-1). HA sends 3x (idx 0,1,2). */
+static void decode_forecast_date_packed(uint32_t packed, int *idx, int *month, int *day) {
+  int i = (int)(packed & 0x3u);
+  uint32_t date = (packed >> 2u) & 0x3FFu;  /* 0-371 */
+  if (idx) *idx = i;
+  if (month) *month = (int)(date / 31u) + 1;
+  if (day) *day = (int)(date % 31u) + 1;
 }
 
 static void onInOutPackedCurrent(uint32_t packed) {
@@ -149,13 +175,21 @@ static void onInOutPackedCurrent(uint32_t packed) {
   Serial.printf("OUT_TEMP received: %.1fC %.0f%% wmo=%d\n", current_out_temp_c, current_out_humidity, current_out_wmo);
 }
 
-static void onInOutPackedForecast(int idx, uint32_t packed) {
+static void onForecastPackedData(int idx, uint32_t packed) {
   if (idx < 0 || idx >= 3) return;
+  decode_forecast_packed(packed, &current_forecast[idx].wmo_code, &current_forecast[idx].temp_min_c, &current_forecast[idx].temp_max_c);
+  prefs_save_forecast(idx, 0, 0);  /* date saved separately */
+}
+
+static void onForecastDatePacked(uint32_t packed) {
+  int idx = 0;
   int m = 0, d = 0;
-  decode_forecast_packed(packed, &m, &d, &current_forecast[idx].wmo_code, &current_forecast[idx].temp_min_c, &current_forecast[idx].temp_max_c);
+  decode_forecast_date_packed(packed, &idx, &m, &d);
+  if (idx < 0 || idx >= 3) return;
   snprintf(current_fc_date[idx], sizeof(current_fc_date[idx]), "%d.%d.", d, m);
   current_forecast[idx].date = current_fc_date[idx];
   prefs_save_forecast(idx, m, d);
+  Serial.printf("FC date received: FC%d = %d.%d.\n", idx + 1, d, m);
 }
 
 /* ZigbeeAnalog callbacks (float present value) */
@@ -166,7 +200,7 @@ static void onTempOutPacked(float analog) {
 
 static void onForecastPacked(float analog, int idx) {
   if (analog < 0.0f) return;
-  onInOutPackedForecast(idx, (uint32_t)lroundf(analog));
+  onForecastPackedData(idx, (uint32_t)lroundf(analog));
   Serial.printf("FC%d received: %s wmo=%d %d/%dC\n", idx + 1, current_fc_date[idx],
     current_forecast[idx].wmo_code, current_forecast[idx].temp_min_c, current_forecast[idx].temp_max_c);
 }
@@ -174,6 +208,11 @@ static void onForecastPacked(float analog, int idx) {
 static void onForecast1Packed(float analog) { onForecastPacked(analog, 0); }
 static void onForecast2Packed(float analog) { onForecastPacked(analog, 1); }
 static void onForecast3Packed(float analog) { onForecastPacked(analog, 2); }
+
+static void onForecastDatesPacked(float analog) {
+  if (analog < 0.0f) return;
+  onForecastDatePacked((uint32_t)lroundf(analog));
+}
 
 static bool read_indoor_sensor(float *temp_c, float *hum_percent) {
   if (!sht4_ready) return false;
@@ -197,7 +236,8 @@ static const char *ui_time_or_blank(const char *time_str) {
 #endif
 }
 
-static void zigbee_init_receiver(void) {
+/** Returns true if Zigbee started and connected; false otherwise (continue with display using last known data). */
+static bool zigbee_init_receiver(void) {
   zbTempIn.setManufacturerAndModel("Espressif", "ZigbeeWeatherStationDemo");
   zbTempIn.setMinMaxValue(-40, 85);
   zbTempIn.setDefaultValue(21.5);
@@ -214,37 +254,52 @@ static void zigbee_init_receiver(void) {
   zbForecast2.setAnalogOutputDescription("FC2 packed");
   zbForecast3.addAnalogOutput();
   zbForecast3.setAnalogOutputDescription("FC3 packed");
+  zbForecastDates.addAnalogOutput();
+  zbForecastDates.setAnalogOutputDescription("FC dates packed");
 
   zbTempOut.onAnalogOutputChange(onTempOutPacked);
   zbForecast1.onAnalogOutputChange(onForecast1Packed);
   zbForecast2.onAnalogOutputChange(onForecast2Packed);
   zbForecast3.onAnalogOutputChange(onForecast3Packed);
+  zbForecastDates.onAnalogOutputChange(onForecastDatesPacked);
 
   Zigbee.addEndpoint(&zbTempIn);
   Zigbee.addEndpoint(&zbTempOut);
   Zigbee.addEndpoint(&zbForecast1);
   Zigbee.addEndpoint(&zbForecast2);
   Zigbee.addEndpoint(&zbForecast3);
+  Zigbee.addEndpoint(&zbForecastDates);
 
   esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ED_CONFIG();
   zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
   Zigbee.setTimeout(10000);
 
   if (!Zigbee.begin(&zigbeeConfig, false)) {
-    Serial.println("Zigbee failed to start, rebooting.");
-    ESP.restart();
+    Serial.println("Zigbee failed to start; continuing with last known data.");
+    return false;
   }
   Serial.println("Connecting to Zigbee network...");
+  unsigned long deadline = millis() + ZIGBEE_CONNECT_TIMEOUT_MS;
   while (!Zigbee.connected()) {
+    if (millis() >= deadline) {
+      Serial.println();
+      Serial.println("Zigbee connect timeout; continuing with last known data.");
+      return false;
+    }
     Serial.print(".");
     delay(100);
   }
   Serial.println();
   Serial.println("Zigbee connected.");
+  if (!prefs_get_zigbee_formed()) {
+    Serial.println("First Zigbee join: waiting 5s for proper configuration...");
+    delay(ZIGBEE_FIRST_FORM_DELAY_MS);
+    prefs_set_zigbee_formed();
+  }
+  return true;
 }
 
 void setup() {
-  delay(50);
   Serial.begin(115200);
 
   pinMode(EPD_BUSY_PIN, INPUT);
@@ -264,9 +319,9 @@ void setup() {
 
   prefs_load_weather();  /* restore last OUT/forecast so we can draw them if HA doesn't send this wake */
 
-  zigbee_init_receiver();
+  bool zigbee_ok = zigbee_init_receiver();
 
-  /* 1. Read indoor, battery, report (triggers HA automation) */
+  /* 1. Read indoor, battery */
   float in_temp = current_in_temp_c;
   float in_hum = current_in_humidity;
   if (read_indoor_sensor(&in_temp, &in_hum)) {
@@ -274,14 +329,16 @@ void setup() {
     current_in_humidity = in_hum;
   }
   current_battery_percent = read_battery_percent();
-  zbTempIn.setTemperature(current_in_temp_c);
-  zbTempIn.setHumidity(current_in_humidity);
-  zbTempIn.setBatteryPercentage((uint8_t)current_battery_percent);
-  zbTempIn.report();
-  zbTempIn.reportBatteryPercentage();
 
-  /* 2. Wait for HA to send OUT + Forecast (Zigbee callbacks update current_*) */
-  delay(WAIT_FOR_HA_MS);
+  if (zigbee_ok) {
+    zbTempIn.setTemperature(current_in_temp_c);
+    zbTempIn.setHumidity(current_in_humidity);
+    zbTempIn.setBatteryPercentage((uint8_t)current_battery_percent);
+    zbTempIn.report();
+    zbTempIn.reportBatteryPercentage();
+    /* 2. Wait for HA to send OUT + Forecast (Zigbee callbacks update current_*) */
+    delay(WAIT_FOR_HA_MS);
+  }
 
   /* 3. Draw display once */
   SPI.end();
@@ -293,6 +350,9 @@ void setup() {
     current_out_temp_c, current_out_humidity, current_out_wmo, current_battery_percent,
     ui_time_or_blank(""), 0.0f, current_forecast);
   EPD_WhiteScreen_ALL_4G(img);
+
+  /* Small delay to allow display to update and print debug information */
+  delay(100);
 
   /* 4. Deep sleep 5 min; on wake, MCU restarts and setup() runs again */
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000u);
