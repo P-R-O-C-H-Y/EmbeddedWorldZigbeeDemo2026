@@ -30,6 +30,13 @@ actions:
             {% set c_hum = curr.relative_humidity_2m | int %} 
             {% set c_temp = ((curr.temperature_2m | float) * 10) | int + 500 %} 
             {# Packing: (temp*10+500)<<14 | Hum<<7 | Code, temp -50.0..+50.0 #} {{ (c_temp * 16384) + (c_hum * 128) + c_code }}
+      - action: zha.set_zigbee_cluster_attribute
+        data:
+          ieee: D0:CF:13:FE:FF:E1:9B:4C
+          endpoint_id: 7
+          cluster_id: 13
+          attribute: 85
+          value: "{{ (now().hour * 60) + now().minute }}"
       - if:
           - condition: template
             value_template: "{{ needs_forecast }}"

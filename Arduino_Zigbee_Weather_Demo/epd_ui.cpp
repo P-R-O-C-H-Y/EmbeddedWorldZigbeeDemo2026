@@ -17,6 +17,7 @@
 #include "fonts/Aktinson24.h"
 #include "fonts/InterRegular28.h"
 #include "fonts/InterBold14.h"
+#include "fonts/InterLabel14.h"
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
@@ -1215,18 +1216,17 @@ void epd_ui_draw_forecast_block(const epd_ui_forecast_day_t *forecast) {
 }
 
 const unsigned char *epd_ui_build_demo_4g(float indoor_temp_c, float indoor_humidity,
-  float outdoor_temp_c, float outdoor_humidity, int wmo_weather_code, float battery_percent,
+  float outdoor_temp_c, float outdoor_humidity, int wmo_weather_code, const char *last_update_str,
   const char *status1, float wind_speed_m_s, const epd_ui_forecast_day_t *forecast) {
   memset(epd_4g_buffer, 0, sizeof(epd_4g_buffer));  /* white background */
   epd_ui_4g_flip_y = 1;  /* flip Y only: orientation matches HELLO, text L→R */
 
   char str[48];
 
-  /* Header: time Inter Regular 32px Dark Gray (font includes colon) */
+  /* Header: time (status1) Inter Regular 32px if set */
   if (status1 && status1[0])
     draw_gfxfont_string_4g((int)EPD_UI_TIME_X, (int)EPD_UI_TIME_Y + 46, status1,
                            &InterTempRegular32pt7b, 2u);
-  draw_battery_icon_4g(EPD_UI_BATTERY_ICON_X, EPD_UI_BATTERY_ICON_Y, battery_percent);
 
   /* IN section: number in 72px/48px, °C in Inter Regular 32px (° at 0x2A); IN label Source Sans 22px */
   format_temp_number(str, sizeof(str), indoor_temp_c);
@@ -1340,7 +1340,13 @@ const unsigned char *epd_ui_build_demo_4g(float indoor_temp_c, float indoor_humi
     }
   }
 
-  /* No separator line at bottom; forecast has same margin below as on sides */
+  /* Bottom: "Last update HH:MM" InterLabel14, centered */
+  if (last_update_str && last_update_str[0]) {
+    snprintf(str, sizeof(str), "Last update %s", last_update_str);
+    { unsigned int w = gfxfont_string_width(str, &InterLabel14pt7b);
+      int tx = (int)(480u > w ? (480u - w) / 2u : 0u);
+      draw_gfxfont_string_4g(tx, (int)EPD_UI_LAST_UPDATE_Y, str, &InterLabel14pt7b, 2u); }
+  }
 
   epd_ui_4g_flip_y = 0;
 

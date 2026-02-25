@@ -36,8 +36,11 @@
 #define EPD_UI_HEADER_H       36u
 #define EPD_UI_LABEL_2X_H     (20u + 8u)   /* Source Sans 22px line + gap */
 
-/* Header: battery left, time to right of battery; battery uses fixed offset, rest uses LAYOUT_SHIFT_Y */
-#define EPD_UI_LAYOUT_SHIFT_Y 24u   /* everything except Forecast/battery moved up by this */
+/* Bottom strip for "Last update HH:MM"; whole layout shifted up by this to make room. */
+#define EPD_UI_LAST_UPDATE_STRIP_H  28u
+
+/* Header: time; IN/separator/OUT use LAYOUT_SHIFT_Y so everything moves up together. */
+#define EPD_UI_LAYOUT_SHIFT_Y (24u + EPD_UI_LAST_UPDATE_STRIP_H)   /* entire content shifted up */
 #define EPD_UI_BATTERY_SHIFT_Y 12u  /* battery Y offset (independent of LAYOUT_SHIFT_Y) */
 #define EPD_UI_TIME_X         (EPD_UI_BATTERY_ICON_X + EPD_UI_BATTERY_ICON_W + 2u + 8u)   /* right of battery */
 #define EPD_UI_TIME_Y         ((EPD_UI_MARGIN - 10u) - EPD_UI_LAYOUT_SHIFT_Y)
@@ -96,11 +99,13 @@
 #define EPD_UI_FORECAST_TEMP_LINE_Y    (EPD_UI_FORECAST_TEMP_Y + 32u + EPD_UI_FORECAST_GAP_TEMP_LINE)
 #define EPD_UI_FORECAST_GAP_LINE_MAX   12u   /* gap below temp line (was 8, +4) */
 #define EPD_UI_FORECAST_TEMP_MAX_Y     (EPD_UI_FORECAST_TEMP_LINE_Y + 1u + EPD_UI_FORECAST_GAP_LINE_MAX)
-/* Anchor forecast at bottom: explicit bottom margin so cards don't touch display edge.
- * Some panels have non-visible area at bottom or driver offset: add EPD_UI_FORECAST_BOTTOM_INSET
- * if the margin does not appear (e.g. try 24 or 32). */
+
+#define EPD_UI_LAST_UPDATE_X       EPD_UI_MARGIN
+#define EPD_UI_LAST_UPDATE_Y      (800u - EPD_UI_MARGIN - 12u)   /* baseline for 14pt */
+
+/* Anchor forecast above bottom strip; explicit bottom margin. */
 #define EPD_UI_FORECAST_BOTTOM_INSET   24u   /* extra offset: add if margin not visible on your panel */
-#define EPD_UI_FORECAST_CARDS_Y        (800u - EPD_UI_FORECAST_BOTTOM_INSET - EPD_UI_FORECAST_CARD_H)
+#define EPD_UI_FORECAST_CARDS_Y        (800u - EPD_UI_FORECAST_BOTTOM_INSET - EPD_UI_FORECAST_CARD_H - EPD_UI_LAST_UPDATE_STRIP_H)
 
 #define EPD_UI_SEPARATOR2_Y   (800u - EPD_UI_MARGIN)  /* unused; no line drawn */
 #define EPD_UI_FOOTER_Y       (800u - EPD_UI_MARGIN)
@@ -214,7 +219,7 @@ void epd_ui_draw_forecast_block(const epd_ui_forecast_day_t *forecast);
  *  forecast: 3 days (date, icon, temp min-max); NULL = placeholders.
  */
 const unsigned char *epd_ui_build_demo_4g(float indoor_temp_c, float indoor_humidity,
-  float outdoor_temp_c, float outdoor_humidity, int wmo_weather_code, float battery_percent,
+  float outdoor_temp_c, float outdoor_humidity, int wmo_weather_code, const char *last_update_str,
   const char *status1, float wind_speed_m_s, const epd_ui_forecast_day_t *forecast);
 
 #define EPD_UI_4G_BUFFER_SIZE  (96000u)  /* EPD_ARRAY * 2 for 4-gray full screen */

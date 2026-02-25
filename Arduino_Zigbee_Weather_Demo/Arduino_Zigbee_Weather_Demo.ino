@@ -2,12 +2,12 @@
  * Arduino Zigbee Weather Demo
  * ESP32-C5, SHT40 (I2C), E-ink, Zigbee -> Home Assistant.
  *
- * Flow per wake (every 5 min):
- * 1. Read indoor (SHT40), battery
+ * Flow per wake (every 5 min or on touch):
+ * 1. Read indoor (SHT40)
  * 2. Report to Zigbee (triggers HA automation)
  * 3. Wait for HA to send OUT + Forecast
  * 4. Draw display once
- * 5. Deep sleep 5 min
+ * 5. Deep sleep 5 min; wake also on touch panel INT (GPIO 4) for immediate update
  */
 
 #ifndef ZIGBEE_MODE_ED
@@ -26,9 +26,10 @@
 
 #define I2C_SCL_PIN 1
 #define I2C_SDA_PIN 2
+#define TOUCH_INT_PIN 4   /* Touch panel INT; wake from deep sleep on touch (ext1) */
 
 #define WAIT_FOR_HA_MS 3000u    /* Wait for HA to send OUT/forecast after report (~1.5s typical, 3s buffer) */
-#define ZIGBEE_FIRST_FORM_DELAY_MS 5000u  /* Extra delay after first Zigbee join for proper config */
+#define ZIGBEE_FIRST_FORM_DELAY_MS 10000u  /* Extra delay after first Zigbee join for proper config */
 #define SLEEP_SECONDS 300u      /* 5 min deep sleep between updates */
 #define ZIGBEE_CONNECT_TIMEOUT_MS 10000u  /* If Zigbee fails to connect within 10s, continue without it */
 
@@ -42,12 +43,13 @@
 #define UI_SHOW_TIME 0
 
 // Zigbee settings
-#define ZIGBEE_IN_ENDPOINT 1 //temp, humidity, battery
+#define ZIGBEE_IN_ENDPOINT 1 // temp, humidity
 #define ZIGBEE_OUT_ENDPOINT 2 // Analog (out temp, hum and weather code)
 #define ZIGBEE_FORECAST1_ENDPOINT 3   // Analog (day 1 wmo, tmin, tmax - fits in float)
 #define ZIGBEE_FORECAST2_ENDPOINT 4   // Analog (day 2 wmo, tmin, tmax)
 #define ZIGBEE_FORECAST3_ENDPOINT 5   // Analog (day 3 wmo, tmin, tmax)
 #define ZIGBEE_FORECAST_DATES_ENDPOINT 6  // Analog (FC1/2/3 dates: idx|(date<<2), sent 3x)
+#define ZIGBEE_LAST_UPDATE_TIME_ENDPOINT 7  // Analog: hour*60+minute (0-1439), HA sends after OUT
 
 // Preferences settings
 #define PREFS_NS "weather"
@@ -61,7 +63,9 @@ static float current_in_humidity = 45.0f;
 static float current_out_temp_c = OUT_TEMP_NO_DATA;
 static float current_out_humidity = OUT_HUM_NO_DATA;
 static int current_out_wmo = OUT_WMO_NO_DATA;
-static float current_battery_percent = 85.0f;
+static int current_last_update_hour = -1;   /* -1 = not received; else 0-23 */
+static int current_last_update_minute = -1; /* 0-59 */
+static char current_last_update_str[16] = "---";  /* "HH:MM" or "---" for display */
 static char current_fc_date[3][12] = { "---", "---", "---" };
 static epd_ui_forecast_day_t current_forecast[3] = {
   { current_fc_date[0], OUT_WMO_NO_DATA, FC_TEMP_NO_DATA, FC_TEMP_NO_DATA },
@@ -75,6 +79,7 @@ static ZigbeeAnalog zbForecast1 = ZigbeeAnalog(ZIGBEE_FORECAST1_ENDPOINT);
 static ZigbeeAnalog zbForecast2 = ZigbeeAnalog(ZIGBEE_FORECAST2_ENDPOINT);
 static ZigbeeAnalog zbForecast3 = ZigbeeAnalog(ZIGBEE_FORECAST3_ENDPOINT);
 static ZigbeeAnalog zbForecastDates = ZigbeeAnalog(ZIGBEE_FORECAST_DATES_ENDPOINT);
+static ZigbeeAnalog zbLastUpdateTime = ZigbeeAnalog(ZIGBEE_LAST_UPDATE_TIME_ENDPOINT);
 
 static Preferences prefs;
 
@@ -84,6 +89,12 @@ static void prefs_load_weather(void) {
   current_out_temp_c = prefs.getFloat("out_temp", OUT_TEMP_NO_DATA);
   current_out_humidity = prefs.getFloat("out_hum", OUT_HUM_NO_DATA);
   current_out_wmo = prefs.getInt("out_wmo", OUT_WMO_NO_DATA);
+  current_last_update_hour = prefs.getInt("upd_hr", -1);
+  current_last_update_minute = prefs.getInt("upd_min", -1);
+  if (current_last_update_hour >= 0 && current_last_update_hour <= 23 && current_last_update_minute >= 0 && current_last_update_minute <= 59)
+    snprintf(current_last_update_str, sizeof(current_last_update_str), "%d:%02d", current_last_update_hour, current_last_update_minute);
+  else
+    snprintf(current_last_update_str, sizeof(current_last_update_str), "---");
   for (int i = 0; i < 3; i++) {
     char key[8];
     snprintf(key, sizeof(key), "fc%d_m", i);
@@ -111,6 +122,8 @@ static void prefs_save_out(void) {
   prefs.putFloat("out_temp", current_out_temp_c);
   prefs.putFloat("out_hum", current_out_humidity);
   prefs.putInt("out_wmo", current_out_wmo);
+  prefs.putInt("upd_hr", current_last_update_hour);
+  prefs.putInt("upd_min", current_last_update_minute);
   prefs.end();
 }
 
@@ -192,6 +205,17 @@ static void onForecastDatePacked(uint32_t packed) {
   Serial.printf("FC date received: FC%d = %d.%d.\n", idx + 1, d, m);
 }
 
+/* Last update time: value = hour*60 + minute (0-1439). */
+static void onLastUpdateTimeReceived(uint32_t value) {
+  int total = (int)value;
+  if (total < 0 || total > 1439) return;
+  current_last_update_hour = total / 60;
+  current_last_update_minute = total % 60;
+  snprintf(current_last_update_str, sizeof(current_last_update_str), "%d:%02d", current_last_update_hour, current_last_update_minute);
+  prefs_save_out();
+  Serial.printf("Last update time received: %s\n", current_last_update_str);
+}
+
 /* ZigbeeAnalog callbacks (float present value) */
 static void onTempOutPacked(float analog) {
   if (analog < 0.0f) return;
@@ -214,6 +238,11 @@ static void onForecastDatesPacked(float analog) {
   onForecastDatePacked((uint32_t)lroundf(analog));
 }
 
+static void onLastUpdateTimePacked(float analog) {
+  if (analog < 0.0f) return;
+  onLastUpdateTimeReceived((uint32_t)lroundf(analog));
+}
+
 static bool read_indoor_sensor(float *temp_c, float *hum_percent) {
   if (!sht4_ready) return false;
   sensors_event_t humidity, temp;
@@ -221,10 +250,6 @@ static bool read_indoor_sensor(float *temp_c, float *hum_percent) {
   *temp_c = temp.temperature;
   *hum_percent = humidity.relative_humidity;
   return true;
-}
-
-static float read_battery_percent(void) {
-  return 85.0f;
 }
 
 static const char *ui_time_or_blank(const char *time_str) {
@@ -243,7 +268,6 @@ static bool zigbee_init_receiver(void) {
   zbTempIn.setDefaultValue(21.5);
   zbTempIn.setTolerance(0.1);
   zbTempIn.addHumiditySensor(0, 100, 1, 45);
-  zbTempIn.setPowerSource(ZB_POWER_SOURCE_BATTERY, (uint8_t)current_battery_percent, 35);
 
   zbTempOut.addAnalogOutput();
   zbTempOut.setAnalogOutputDescription("OUT packed");
@@ -256,12 +280,15 @@ static bool zigbee_init_receiver(void) {
   zbForecast3.setAnalogOutputDescription("FC3 packed");
   zbForecastDates.addAnalogOutput();
   zbForecastDates.setAnalogOutputDescription("FC dates packed");
+  zbLastUpdateTime.addAnalogOutput();
+  zbLastUpdateTime.setAnalogOutputDescription("Last update time (hour*60+min)");
 
   zbTempOut.onAnalogOutputChange(onTempOutPacked);
   zbForecast1.onAnalogOutputChange(onForecast1Packed);
   zbForecast2.onAnalogOutputChange(onForecast2Packed);
   zbForecast3.onAnalogOutputChange(onForecast3Packed);
   zbForecastDates.onAnalogOutputChange(onForecastDatesPacked);
+  zbLastUpdateTime.onAnalogOutputChange(onLastUpdateTimePacked);
 
   Zigbee.addEndpoint(&zbTempIn);
   Zigbee.addEndpoint(&zbTempOut);
@@ -269,6 +296,7 @@ static bool zigbee_init_receiver(void) {
   Zigbee.addEndpoint(&zbForecast2);
   Zigbee.addEndpoint(&zbForecast3);
   Zigbee.addEndpoint(&zbForecastDates);
+  Zigbee.addEndpoint(&zbLastUpdateTime);
 
   esp_zb_cfg_t zigbeeConfig = ZIGBEE_DEFAULT_ED_CONFIG();
   zigbeeConfig.nwk_cfg.zed_cfg.keep_alive = 10000;
@@ -321,21 +349,18 @@ void setup() {
 
   bool zigbee_ok = zigbee_init_receiver();
 
-  /* 1. Read indoor, battery */
+  /* 1. Read indoor */
   float in_temp = current_in_temp_c;
   float in_hum = current_in_humidity;
   if (read_indoor_sensor(&in_temp, &in_hum)) {
     current_in_temp_c = in_temp;
     current_in_humidity = in_hum;
   }
-  current_battery_percent = read_battery_percent();
 
   if (zigbee_ok) {
     zbTempIn.setTemperature(current_in_temp_c);
     zbTempIn.setHumidity(current_in_humidity);
-    zbTempIn.setBatteryPercentage((uint8_t)current_battery_percent);
     zbTempIn.report();
-    zbTempIn.reportBatteryPercentage();
     /* 2. Wait for HA to send OUT + Forecast (Zigbee callbacks update current_*) */
     delay(WAIT_FOR_HA_MS);
   }
@@ -347,15 +372,17 @@ void setup() {
   EPD_HW_Init_4G();
   const unsigned char *img = epd_ui_build_demo_4g(
     current_in_temp_c, current_in_humidity,
-    current_out_temp_c, current_out_humidity, current_out_wmo, current_battery_percent,
+    current_out_temp_c, current_out_humidity, current_out_wmo, current_last_update_str,
     ui_time_or_blank(""), 0.0f, current_forecast);
   EPD_WhiteScreen_ALL_4G(img);
 
   /* Small delay to allow display to update and print debug information */
   delay(100);
 
-  /* 4. Deep sleep 5 min; on wake, MCU restarts and setup() runs again */
+  /* 4. Deep sleep: wake on 5 min timer OR touch (INT on GPIO 4). On wake, setup() runs again. */
+  pinMode(TOUCH_INT_PIN, INPUT_PULLUP);   /* Idle high; touch pulls INT low -> wake */
   esp_sleep_enable_timer_wakeup((uint64_t)SLEEP_SECONDS * 1000000u);
+  esp_sleep_enable_ext1_wakeup_io((1ULL << TOUCH_INT_PIN), ESP_EXT1_WAKEUP_ANY_LOW);
   esp_deep_sleep_start();
 }
 

@@ -1,0 +1,41 @@
+alias: Zigbee Weather Station - Signal & Battery Watchdog
+description: ""
+triggers:
+  - entity_id:
+      - sensor.espressif_zigbeeweatherstationdemo_temperature
+    for:
+      hours: 0
+      minutes: 12
+      seconds: 0
+    trigger: state
+  - entity_id: sensor.espressif_zigbeeweatherstationdemo_lqi
+    below: 20
+    trigger: numeric_state
+actions:
+  - action: notify.mobile_app_your_phone
+    data:
+      title: Weather Station Health Alert
+      message: |
+        {% if trigger.platform == 'numeric_state' %}
+          Warning: Signal is very weak (LQI: {{ states('sensor.espressif_zigbeeweatherstationdemo_lqi') }}).
+          Battery may be dying!
+        {% else %}
+          The device has stopped reporting (12-minute silence).
+          It is likely discharged or out of range.
+        {% endif %}
+      data:
+        tag: weather_station_warning
+  - action: notify.persistent_notification
+    metadata: {}
+    data:
+      title: Weather Station Health Alert
+      message: |
+        {% if trigger.platform == 'numeric_state' %}
+          Warning: Signal is very weak (LQI: {{ states('sensor.espressif_zigbeeweatherstationdemo_lqi') }}).
+          Battery may be dying!
+        {% else %}
+          The device has stopped reporting (12-minute silence).
+          It is likely discharged or out of range.
+        {% endif %}
+      data:
+        tag: weather_station_warning

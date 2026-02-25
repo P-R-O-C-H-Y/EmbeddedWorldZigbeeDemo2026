@@ -6,14 +6,15 @@ A low-power weather station built on **ESP32-C5** (M5Stack Stamp-C5) that displa
 
 ## Overview
 
-The device wakes every **5 minutes**, reads indoor temperature and humidity from the SHT40 sensor, reports to Zigbee (which triggers a Home Assistant automation), waits for HA to push outdoor data and forecast, updates the E-ink display, then enters deep sleep. Outdoor and forecast data are stored in NVS so the display keeps showing the last received values when HA does not send new data (e.g., forecast updates only hourly).
+The device wakes every **5 minutes** or on **touch** (touch panel INT), reads indoor temperature and humidity from the SHT40 sensor, reports to Zigbee (which triggers a Home Assistant automation), waits for HA to push outdoor data and forecast, updates the E-ink display, then enters deep sleep. Outdoor and forecast data are stored in NVS so the display keeps showing the last received values when HA does not send new data (e.g., forecast updates only hourly).
 
 ### Features
 
 - **Indoor**: Temperature and humidity from SHT40 (I2C)
 - **Outdoor**: Current temperature, humidity, and weather icon from Open-Meteo (via HA)
 - **Forecast**: 3-day forecast with date, weather icon, and min/max temperatures
-- **Battery**: Percentage displayed in the header
+- **Touch wakeup**: Touch the panel to wake from deep sleep and refresh immediately (no need to wait for the 5‑minute timer)
+- **Last update**: Time of last data refresh shown at the bottom of the screen (from HA)
 - **Persistence**: Last outdoor data and forecast saved to NVS; used when HA does not send data this wake
 
 ---
@@ -30,6 +31,7 @@ The device wakes every **5 minutes**, reads indoor temperature and humidity from
 **Pin configuration** (see `Arduino_Zigbee_Weather_Demo.ino`):
 
 - I2C: SDA = 2, SCL = 1 (SHT40)
+- Touch INT: GPIO 4 (wake from deep sleep on touch)
 - EPD: Defined in `Display_EPD_W21_spi.h` / `Display_EPD_W21.h`
 
 ---
@@ -89,7 +91,7 @@ input_datetime:
     name: "Last weather forecast sync"
 ```
 
-### 5. Import the automation
+### 5. Import the data sync automation
 
 1. Go to **Settings → Automations**.
 2. Click **Create automation** → **Edit in YAML**.
@@ -97,16 +99,27 @@ input_datetime:
 4. Replace the placeholder IEEE address (`D0:CF:13:FE:FF:E1:9B:4C`) with your device’s IEEE address (in both `zha.set_zigbee_cluster_attribute` actions).
 5. Save and enable the automation.
 
+### 6. (Optional) Import the health watchdog automation
+
+The **Signal & Battery Watchdog** automation notifies you if the weather station stops reporting (no temperature update for 12 minutes) or if the Zigbee link quality (LQI) drops below 20—useful to spot a dead device, weak signal, or unit out of range.
+
+1. Go to **Settings → Automations** → **Create automation** → **Edit in YAML**.
+2. Paste the contents of `ha_automation_zigbee_weather_station_health_watchdog.yaml`.
+3. Replace `sensor.espressif_zigbeeweatherstationdemo_temperature` and `sensor.espressif_zigbeeweatherstationdemo_lqi` with your device’s actual entity IDs (check **Settings → Devices & Services → Zigbee** → your device → entities).
+4. Replace `notify.mobile_app_your_phone` with your mobile app notify target (or remove that action if you only want persistent notifications).
+5. Save and enable the automation.
+
 ---
 
 ## How it works
 
-1. The device reports indoor temperature, humidity, and battery over Zigbee.
-2. A state change on the temperature sensor triggers the HA automation.
-3. The automation calls the Open-Meteo REST API and receives current conditions and 3-day forecast.
-4. HA encodes the data as packed 32-bit integers and writes them to Zigbee Analog Output clusters (endpoints 2–5).
-5. The device receives the values, decodes them, stores them in NVS, and refreshes the E-ink display.
-6. The device sleeps for 5 minutes and repeats the cycle.
+1. The device wakes on a 5‑minute timer or when the touch panel INT (GPIO 4) goes low (touch).
+2. It reports indoor temperature and humidity over Zigbee.
+3. A state change on the temperature sensor triggers the HA automation.
+4. The automation calls the Open-Meteo REST API and receives current conditions and 3-day forecast.
+5. HA encodes the data as packed 32-bit integers and writes them to Zigbee Analog Output clusters (endpoints 2–5), and sends the last-update time to endpoint 7.
+6. The device receives the values, decodes them, stores them in NVS, and refreshes the E-ink display.
+7. The device enters deep sleep (wake on timer or touch) and the cycle repeats.
 
 **Data rates:**
 
@@ -117,12 +130,20 @@ input_datetime:
 
 ## Files
 
-| File                                | Purpose                          |
-|-------------------------------------|----------------------------------|
-| `Arduino_Zigbee_Weather_Demo.ino`   | Main firmware                    |
-| `epd_ui.cpp` / `epd_ui.h`           | E-ink layout and drawing         |
-| `weather_icons/`                   | Weather icon assets (4G + 1-bit) |
-| `ha_automation_zigbee_station_smart_sync.yaml` | HA automation definition  |
+| File                                                | Purpose                                  |
+|-----------------------------------------------------|------------------------------------------|
+| `Arduino_Zigbee_Weather_Demo.ino`                   | Main firmware                            |
+| `epd_ui.cpp` / `epd_ui.h`                           | E-ink layout and drawing                 |
+| `weather_icons/`                                   | Weather icon assets (4G + 1-bit)         |
+| `ha_automation_zigbee_station_smart_sync.yaml`      | HA automation: data sync (OUT + forecast)|
+| `ha_automation_zigbee_weather_station_health_watchdog.yaml` | HA automation: health/signal watchdog & notifications |
+
+---
+
+## Editor / clang (IntelliSense)
+
+If you use **clang** or **Cursor/VS Code** and see “no definition” for `ZigbeeTempSensor`, `ZigbeeAnalog`, or Arduino APIs, use **`.vscode/c_cpp_properties.json`**: it follows the same layout as the ESP32 hardware repo. The path is set by **`ARDUINO_ESP32_HARDWARE`** in the `env` block (default: `~/Documents/Arduino/hardware/espressif/esp32`). Select **ESP32-C5** or **ESP32-C6** in the status bar; For **clangd** (e.g. C/C++ by Anysphere), edit **`Arduino_Zigbee_Weather_Demo/compile_flags.txt`** so the `-I` paths point to your Arduino ESP32 hardware folder, then **Developer: Reload Window**.
+
 
 ---
 
