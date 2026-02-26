@@ -135,6 +135,7 @@ The **Signal & Battery Watchdog** automation notifies you if the weather station
 | `Arduino_Zigbee_Weather_Demo.ino`                   | Main firmware                            |
 | `epd_ui.cpp` / `epd_ui.h`                           | E-ink layout and drawing                 |
 | `weather_icons/`                                   | Weather icon assets (4G + 1-bit)         |
+| `no_signal.png`                                    | No-signal icon (Zigbee failed); run `python tools/png_to_4g_header.py no_signal.png` to regenerate `weather_icons/no_signal_4g.h` |
 | `ha_automation_zigbee_station_smart_sync.yaml`      | HA automation: data sync (OUT + forecast)|
 | `ha_automation_zigbee_weather_station_health_watchdog.yaml` | HA automation: health/signal watchdog & notifications |
 

@@ -373,7 +373,7 @@ void setup() {
   const unsigned char *img = epd_ui_build_demo_4g(
     current_in_temp_c, current_in_humidity,
     current_out_temp_c, current_out_humidity, current_out_wmo, current_last_update_str,
-    ui_time_or_blank(""), 0.0f, current_forecast);
+    ui_time_or_blank(""), 0.0f, current_forecast, !zigbee_ok);
   EPD_WhiteScreen_ALL_4G(img);
 
   /* Small delay to allow display to update and print debug information */

@@ -49,6 +49,9 @@
 #define EPD_UI_BATTERY_ICON_H 32u
 #define EPD_UI_BATTERY_ICON_X EPD_UI_MARGIN   /* left side, margin from edge */
 #define EPD_UI_BATTERY_ICON_Y ((EPD_UI_MARGIN) - EPD_UI_BATTERY_SHIFT_Y + 4u)
+/* Top-left warning "!" when Zigbee connection timed out (IN updated, OUT not synced) */
+#define EPD_UI_WARNING_ICON_X  ((int)EPD_UI_MARGIN)
+#define EPD_UI_WARNING_ICON_Y  ((int)EPD_UI_TIME_Y + 46)   /* same baseline as header time */
 
 /* IN section: TEMP (72px) then HUM (48px) then "IN" label (22px) */
 #define EPD_UI_INOUT_SHIFT_Y  8u   /* IN, separator, OUT (temp/hum/icon) moved up by this */
@@ -217,10 +220,12 @@ void epd_ui_draw_forecast_block(const epd_ui_forecast_day_t *forecast);
 /** Build full-screen 4G image buffer (96000 bytes) with demo layout (per ASCII art).
  *  status1: time (top-left). wind_speed_m_s: unused (kept for API compatibility).
  *  forecast: 3 days (date, icon, temp min-max); NULL = placeholders.
+ *  zigbee_sync_warning: if true, draw "!" top-left (Zigbee timeout after previous join; OUT not synced).
  */
 const unsigned char *epd_ui_build_demo_4g(float indoor_temp_c, float indoor_humidity,
   float outdoor_temp_c, float outdoor_humidity, int wmo_weather_code, const char *last_update_str,
-  const char *status1, float wind_speed_m_s, const epd_ui_forecast_day_t *forecast);
+  const char *status1, float wind_speed_m_s, const epd_ui_forecast_day_t *forecast,
+  bool zigbee_sync_warning);
 
 #define EPD_UI_4G_BUFFER_SIZE  (96000u)  /* EPD_ARRAY * 2 for 4-gray full screen */
 

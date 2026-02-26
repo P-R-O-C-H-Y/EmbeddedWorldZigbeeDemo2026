@@ -6,6 +6,7 @@
 #include "epd_ui.h"
 #include "Display_EPD_W21.h"
 #include "weather_icons/weather_icons_4g.h"
+#include "weather_icons/no_signal_4g.h"
 #include "fonts/gfxfont.h"
 #if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
 #include <pgmspace.h>  /* ESP32: pgm_read_ptr reads 32-bit pointers from flash */
@@ -248,6 +249,41 @@ static void draw_rect_outline_4g(unsigned int bx, unsigned int by, unsigned int 
 static void draw_hline_4g(unsigned int x0, unsigned int x1, unsigned int y) {
   for (; x0 <= x1; x0++)
     set_pixel_4g(x0, y);
+}
+
+/* Line from (x0,y0) to (x1,y1), 4-gray value (0=white .. 3=black). */
+static void draw_line_4g_value(int x0, int y0, int x1, int y1, unsigned int value) {
+  if (value > 3u) return;
+  int dx = (x1 >= x0) ? (x1 - x0) : (x0 - x1);
+  int dy = (y1 >= y0) ? (y1 - y0) : (y0 - y1);
+  int sx = (x0 < x1) ? 1 : -1;
+  int sy = (y0 < y1) ? 1 : -1;
+  int err = dx - dy;
+  for (;;) {
+    if ((unsigned int)x0 < EPD_WIDTH && (unsigned int)y0 < EPD_HEIGHT)
+      set_pixel_4g_value((unsigned int)x0, (unsigned int)y0, value);
+    if (x0 == x1 && y0 == y1) break;
+    int e2 = 2 * err;
+    if (e2 > -dy) { err -= dy; x0 += sx; }
+    if (e2 < dx)  { err += dx; y0 += sy; }
+  }
+}
+
+/* No-signal icon: 3 vertical bars (signal strength) with diagonal backslash through them. 2x size (40x48). */
+static void draw_no_signal_icon_4g(unsigned int bx, unsigned int by, unsigned int value) {
+  if (value > 3u) return;
+  /* 2x size: bars 12/24/36 tall, each 8px wide, 4px gap; bottom-aligned at by+40 */
+  const unsigned int bar_h1 = 12u, bar_h2 = 24u, bar_h3 = 36u;
+  const unsigned int bar_w = 8u, gap = 4u;
+  const unsigned int base_y = by + 40u;
+  const unsigned int icon_w = 40u, icon_h = 48u;
+  fill_rect_4g_value(bx,                  base_y - bar_h1, bar_w, bar_h1, value);
+  fill_rect_4g_value(bx + bar_w + gap,    base_y - bar_h2, bar_w, bar_h2, value);
+  fill_rect_4g_value(bx + 2u * (bar_w + gap), base_y - bar_h3, bar_w, bar_h3, value);
+  /* Thick backslash (3 lines) */
+  draw_line_4g_value((int)bx, (int)by, (int)(bx + icon_w), (int)(by + icon_h), value);
+  draw_line_4g_value((int)(bx + 1u), (int)by, (int)(bx + icon_w + 1u), (int)(by + icon_h), value);
+  draw_line_4g_value((int)(bx + 2u), (int)by, (int)(bx + icon_w + 2u), (int)(by + icon_h), value);
 }
 
 /* Degree symbol in InterRegular32 is at 0x2A (reused from *). */
@@ -1217,11 +1253,19 @@ void epd_ui_draw_forecast_block(const epd_ui_forecast_day_t *forecast) {
 
 const unsigned char *epd_ui_build_demo_4g(float indoor_temp_c, float indoor_humidity,
   float outdoor_temp_c, float outdoor_humidity, int wmo_weather_code, const char *last_update_str,
-  const char *status1, float wind_speed_m_s, const epd_ui_forecast_day_t *forecast) {
+  const char *status1, float wind_speed_m_s, const epd_ui_forecast_day_t *forecast,
+  bool zigbee_sync_warning) {
   memset(epd_4g_buffer, 0, sizeof(epd_4g_buffer));  /* white background */
   epd_ui_4g_flip_y = 1;  /* flip Y only: orientation matches HELLO, text L→R */
 
   char str[48];
+
+  /* Top-left: no-signal icon when Zigbee failed. Left margin EPD_UI_MARGIN; 10px up from header. */
+  if (zigbee_sync_warning) {
+    const unsigned int wx = (unsigned int)(EPD_UI_WARNING_ICON_X >= 0 ? EPD_UI_WARNING_ICON_X : 0);
+    const unsigned int icon_top_y = (EPD_UI_MARGIN >= 10u) ? (EPD_UI_MARGIN - 10u) : 0u;
+    blit_4g_icon_to_4g(no_signal_4g, wx, icon_top_y, NO_SIGNAL_4G_W, NO_SIGNAL_4G_H);
+  }
 
   /* Header: time (status1) Inter Regular 32px if set */
   if (status1 && status1[0])
